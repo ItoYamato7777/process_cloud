@@ -17,22 +17,50 @@ def plot_points(points, colors = None):
         pcd = points
 
     elif type(points) is np.ndarray:
-        # remove np.nan
-        # (H, W, 3) のような形状を想定
-        is_point = np.where(np.logical_not(np.isnan(points)))
-        points = points[is_point]
-        # reshape
-        points = points.reshape((int(points.size/3),3))
-        # convert to py3d.PointCloud
+        # (H, W, 3) のような形状を (H*W, 3) に変形
+        points_shape = points.shape
+        if len(points_shape) == 3 and points_shape[2] == 3:
+            # (H, W, 3) -> (H*W, 3)
+            points_flat = points.reshape(-1, 3)
+        elif len(points_shape) == 2 and points_shape[1] == 3:
+            # すでに (N, 3) 形式
+            points_flat = points
+        else:
+            print(f"サポート外のNumpy配列形状です: {points_shape}")
+            return
+
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-    
+
         if not colors is None:
-            # colors も (H, W, 3) を想定
-            colors = np.array(colors[is_point], np.uint8)
-            colors = colors.reshape((1, int(colors.size/3), 3))
-            colors = cv2.cvtColor(colors, cv2.COLOR_BGR2RGB) / 255.0
-            pcd.colors = o3d.utility.Vector3dVector(colors[0])
+            # colors も points と同じ形状を想定
+            colors_shape = colors.shape
+            if len(colors_shape) == 3 and colors_shape[2] == 3:
+                colors_flat = colors.reshape(-1, 3)
+            elif len(colors_shape) == 2 and colors_shape[1] == 3:
+                colors_flat = colors
+            else:
+                print(f"サポート外のNumpy配列形状です (Colors): {colors_shape}")
+                return
+
+            # points の NaN に基づいてフィルタリング
+            valid_mask = ~np.isnan(points_flat).any(axis=1)
+            
+            points_valid = points_flat[valid_mask]
+            colors_valid = colors_flat[valid_mask]
+            
+            pcd.points = o3d.utility.Vector3dVector(points_valid)
+
+            # BGR -> RGB 変換 (uint8想定)
+            if colors_valid.size > 0:
+                colors_rgb = cv2.cvtColor(colors_valid.reshape(1, -1, 3).astype(np.uint8), cv2.COLOR_BGR2RGB) / 255.0
+                pcd.colors = o3d.utility.Vector3dVector(colors_rgb[0])
+            
+        else:
+            # colors がない場合
+            valid_mask = ~np.isnan(points_flat).any(axis=1)
+            points_valid = points_flat[valid_mask]
+            
+            pcd.points = o3d.utility.Vector3dVector(points_valid)
   
     o3d.visualization.draw_geometries([pcd])
 
@@ -60,64 +88,18 @@ def cluster_points_dbscan(points, eps=0.01, min_samples=10):
     return labels
 
 
-def create_circle_lineset(center, radius=1, normal=[0, 0, 1], resolution=32, color=[1, 0, 0]):
-    """
-    指定された中心と法線を持つ円のLineSetを生成します。
-    
-    in:
-        center (np.array): 円の中心座標 [x, y, z]
-        radius (float): 円の半径
-        normal (list): 円が乗る平面の法線ベクトル (デフォルトはZ軸)
-        resolution (int): 円を近似するための線分の数
-        color (list): 円の色 [R, G, B] (0-1)
-    out:
-        o3d.geometry.LineSet: 円形状のラインセット
-    """
-    # 法線ベクトルを正規化
-    normal = np.array(normal) / np.linalg.norm(normal)
-    
-    # 法線に直交する2つのベクトル (u, v) を見つける
-    # (簡易的な方法: normal が [0, 0, 1] でない場合も対応)
-    if np.allclose(normal, [0, 0, 1]) or np.allclose(normal, [0, 0, -1]):
-        u = np.array([1, 0, 0])
-    else:
-        u = np.cross(normal, [0, 0, 1])
-        u /= np.linalg.norm(u)
-    v = np.cross(normal, u)
-    v /= np.linalg.norm(v) # vも正規化
-
-    points = []
-    for i in range(resolution + 1):
-        theta = 2.0 * np.pi * i / resolution
-        # 円周上の点を計算: P = Center + R*cos(t)*u + R*sin(t)*v
-        p = center + radius * (np.cos(theta) * u + np.sin(theta) * v)
-        points.append(p)
-    
-    lines = []
-    for i in range(resolution):
-        lines.append([i, i + 1])
-        
-    colors = [color] * len(lines)
-    
-    line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(points)
-    line_set.lines = o3d.utility.Vector2iVector(lines)
-    line_set.colors = o3d.utility.Vector3dVector(colors)
-    
-    return line_set
-
-def find_knot_target_on_top_cluster(points, labels, circle_radius=0.05):
+def find_knot_target_on_top_cluster(points, labels, sphere_radius=0.05): # 引数名をsphere_radiusに変更
     """
     クラスタリングされた点群から「箱の上の紐」を特定し、
-    X座標最大の点（ターゲット）と、その点に描画する円を返します。
+    X座標最大の点（ターゲット）と、その点に描画する球体を返します。
 
     in:
         points (np.array): (N, 3) のクラスタリング対象となった点群
         labels (np.array): (N,) のDBSCANラベル (ノイズは-1)
-        circle_radius (float): 描画する円の半径
+        sphere_radius (float): 描画する球体の半径
     out:
         target_point (np.array): X座標最大の点 [x, y, z]
-        circle_geom (o3d.geometry.LineSet): 描画用の円
+        sphere_geom (o3d.geometry.TriangleMesh): 描画用の球体
         top_cluster_pcd (o3d.geometry.PointCloud): 抽出された「箱の上の紐」の点群
     """
     
@@ -145,6 +127,10 @@ def find_knot_target_on_top_cluster(points, labels, circle_radius=0.05):
     
     # 「箱の上の紐」の点群データを取得
     top_cluster_points = points[labels == top_cluster_id]
+
+    if top_cluster_points.shape[0] == 0:
+        print(f"クラスター {top_cluster_id} に点が見つかりません。")
+        return None, None, None
     
     # X座標が最大となる点を検索
     max_x_index = np.argmax(top_cluster_points[:, 0]) # X座標 (インデックス0)
@@ -152,20 +138,18 @@ def find_knot_target_on_top_cluster(points, labels, circle_radius=0.05):
     
     print(f"希望結び目位置 (X最大): {target_point}")
     
-    # ターゲット点を中心に円を生成 (XY平面、つまり法線=[0,0,1])
-    circle_geom = create_circle_lineset(
-        center=target_point, 
-        radius=circle_radius, 
-        normal=[0, 0, 1], # Z軸に垂直な円 (XY平面)
-        color=[1, 0, 0] # 赤色
-    )
+    # ターゲット点を中心に球体を生成
+    # o3d.geometry.TriangleMesh.create_mesh_sphere を使用
+    sphere_geom = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius)
+    sphere_geom.translate(target_point) # 中心をターゲット点に移動
+    sphere_geom.paint_uniform_color([1, 0, 0]) # 赤色に設定
     
     # 可視化のために、このクラスターの点群オブジェクトも作成
     top_cluster_pcd = o3d.geometry.PointCloud()
     top_cluster_pcd.points = o3d.utility.Vector3dVector(top_cluster_points)
     top_cluster_pcd.paint_uniform_color([0, 1, 0]) # 「箱の上の紐」を緑色に
     
-    return target_point, circle_geom, top_cluster_pcd
+    return target_point, sphere_geom, top_cluster_pcd # 返り値をsphere_geomに変更
 
 
 # --- メイン処理 ---
@@ -201,7 +185,7 @@ try:
     # 4-2. DBSCAN関数を呼び出す
     labels = cluster_points_dbscan(valid_points, eps=10, min_samples=30)
 
-    # 4-3. 「箱の上の紐」を特定し、ターゲット（円）を計算
+    # 4-3. 「箱の上の紐」を特定し、ターゲット（球体）を計算
     
     # 描画するジオメトリを格納するリスト
     geometries_to_draw = []
@@ -216,10 +200,17 @@ try:
         # クラスターごとに色を割り当てる
         max_label = labels_clustered.max()
         if max_label >= 0:
-            cmap = plt.get_cmap("tab10", max_label + 1)
-            norm_labels = labels_clustered / max_label if max_label > 0 else labels_clustered.astype(float)
-            colors_rgb = cmap(norm_labels)[:, :3]
+            # cmapの色数を指定
+            cmap = plt.get_cmap("tab10") 
+            colors_rgb = np.zeros((labels_clustered.shape[0], 3))
             
+            # 各ラベルID (0, 1, 2, ...) を cmap のインデックス (0-9) にマッピング
+            for i, label_id in enumerate(np.unique(labels_clustered)):
+                indices = np.where(labels_clustered == label_id)
+                # cmap の色数で剰余を取り、循環させる
+                color_index = label_id % cmap.N 
+                colors_rgb[indices] = cmap(color_index)[:3]
+
             pcd_clustered = o3d.geometry.PointCloud()
             pcd_clustered.points = o3d.utility.Vector3dVector(points_clustered)
             pcd_clustered.colors = o3d.utility.Vector3dVector(colors_rgb)
@@ -228,25 +219,26 @@ try:
             print("DBSCANクラスタリング結果（色分け）を準備しました。")
 
 
-    # 新しい関数を呼び出して、ターゲット点と円を取得
-    target_pos, target_circle, top_pcd = find_knot_target_on_top_cluster(
+    # 新しい関数を呼び出して、ターゲット点と球体を取得
+    # 変数名をtarget_sphereに変更
+    target_pos, target_sphere, top_pcd = find_knot_target_on_top_cluster(
         valid_points, 
         labels,
-        circle_radius=10# 円の半径 (例: 3cm)
+        sphere_radius=3 # 球体の半径 (例: 3cm)
     )
 
     # 4-4. 結果の可視化
-    if target_pos is not None:
+    if target_pos is not None and target_sphere is not None: # target_sphereのチェックを追加
         print(f"最終的な希望結び目位置: {target_pos}")
         
         # (オプション) もし「箱の上の紐」だけをハイライトしたい場合
         # geometries_to_draw.clear() # 他のクラスターを消す
         # geometries_to_draw.append(top_pcd) # 緑色の「上の紐」だけ追加
 
-        # ターゲットの円を追加
-        geometries_to_draw.append(target_circle) 
+        # ターゲットの球体を追加
+        geometries_to_draw.append(target_sphere) 
         
-        print("ターゲット位置に円を描画して表示します...")
+        print("ターゲット位置に球体を描画して表示します...")
         o3d.visualization.draw_geometries(geometries_to_draw)
         
     else:
@@ -255,7 +247,6 @@ try:
         if geometries_to_draw:
             print("クラスタリング結果のみ表示します...")
             o3d.visualization.draw_geometries(geometries_to_draw)
-
 
 except FileNotFoundError:
     print(f"エラー: ファイル '{input_filename}' が見つかりません。")
