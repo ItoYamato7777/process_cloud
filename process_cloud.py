@@ -88,7 +88,7 @@ def cluster_points_dbscan(points, eps=0.01, min_samples=10):
     return labels
 
 
-def find_knot_target_on_top_cluster(points, labels, sphere_radius=0.05): # 引数名をsphere_radiusに変更
+def find_knot_target_on_top_cluster(points, labels, sphere_radius=0.05):
     """
     クラスタリングされた点群から「箱の上の紐」を特定し、
     X座標最大の点（ターゲット）と、その点に描画する球体を返します。
@@ -113,17 +113,17 @@ def find_knot_target_on_top_cluster(points, labels, sphere_radius=0.05): # 引�
 
     # 各クラスターの平均Z座標を計算
     top_cluster_id = -1
-    max_mean_z = -np.inf
+    min_mean_z = np.inf
     
     for label_id in unique_labels:
         cluster_points = points[labels == label_id]
         mean_z = np.mean(cluster_points[:, 2]) # Z座標の平均
         
-        if mean_z > max_mean_z:
-            max_mean_z = mean_z
+        if mean_z < min_mean_z:
+            min_mean_z = mean_z
             top_cluster_id = label_id
             
-    print(f"「箱の上の紐」クラスターID: {top_cluster_id} (平均Z座標: {max_mean_z:.4f})")
+    print(f"「箱の上の紐」クラスターID: {top_cluster_id} (平均Z座標: {min_mean_z:.4f})")
     
     # 「箱の上の紐」の点群データを取得
     top_cluster_points = points[labels == top_cluster_id]
@@ -139,7 +139,6 @@ def find_knot_target_on_top_cluster(points, labels, sphere_radius=0.05): # 引�
     print(f"希望結び目位置 (X最大): {target_point}")
     
     # ターゲット点を中心に球体を生成
-    # o3d.geometry.TriangleMesh.create_mesh_sphere を使用
     sphere_geom = o3d.geometry.TriangleMesh.create_sphere(radius=sphere_radius)
     sphere_geom.translate(target_point) # 中心をターゲット点に移動
     sphere_geom.paint_uniform_color([1, 0, 0]) # 赤色に設定
@@ -149,23 +148,20 @@ def find_knot_target_on_top_cluster(points, labels, sphere_radius=0.05): # 引�
     top_cluster_pcd.points = o3d.utility.Vector3dVector(top_cluster_points)
     top_cluster_pcd.paint_uniform_color([0, 1, 0]) # 「箱の上の紐」を緑色に
     
-    return target_point, sphere_geom, top_cluster_pcd # 返り値をsphere_geomに変更
+    return target_point, sphere_geom, top_cluster_pcd
 
 
 # --- メイン処理 ---
 
-# 1. 保存した .npz ファイルを読み込む
-input_filename = './data/my_filtered_pointcloud.npz'
-print(f"{input_filename} を読み込んでいます...")
-try:
-    data = np.load(input_filename)
-
-    # 2. 保存時に指定した名前で配列を取り出す
-    loaded_points = data['points']
-    loaded_colors = data['colors']
-
-    print(f"読み込み成功。")
-
+def specify_desired_knot_position(loaded_points, loaded_colors):
+    """
+    点群データを処理し、クラスタリングと可視化を実行する。
+    
+    in:
+        loaded_points (np.array): (H, W, 3) または (N, 3) の点群データ
+        loaded_colors (np.array): (H, W, 3) または (N, 3) の色データ
+    """
+    
     # 3. 読み込んだデータでプロット (元の紐の点群)
     print("元の（フィルタリング済み）紐の点群を表示します...")
     plot_points(loaded_points, loaded_colors)
@@ -189,6 +185,12 @@ try:
     
     # 描画するジオメトリを格納するリスト
     geometries_to_draw = []
+
+    # 原点に座標軸を追加
+    # 軸の長さを点群のスケールに合わせて調整 (例: 0.1m)
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+    geometries_to_draw.append(coord_frame)
+    print("原点に座標軸を追加しました。")
     
     # (オプション) DBSCANで色分けした全クラスターを背景として表示する場合
     # ノイズ除去
@@ -220,7 +222,6 @@ try:
 
 
     # 新しい関数を呼び出して、ターゲット点と球体を取得
-    # 変数名をtarget_sphereに変更
     target_pos, target_sphere, top_pcd = find_knot_target_on_top_cluster(
         valid_points, 
         labels,
@@ -228,7 +229,7 @@ try:
     )
 
     # 4-4. 結果の可視化
-    if target_pos is not None and target_sphere is not None: # target_sphereのチェックを追加
+    if target_pos is not None and target_sphere is not None:
         print(f"最終的な希望結び目位置: {target_pos}")
         
         # (オプション) もし「箱の上の紐」だけをハイライトしたい場合
@@ -247,6 +248,27 @@ try:
         if geometries_to_draw:
             print("クラスタリング結果のみ表示します...")
             o3d.visualization.draw_geometries(geometries_to_draw)
+
+
+# --- スクリプト実行のエントリポイント ---
+
+# 1. 保存した .npz ファイルを読み込む
+input_filename = './data/my_filtered_pointcloud.npz'
+print(f"{input_filename} を読み込んでいます...")
+
+try:
+    data = np.load(input_filename)
+
+    # 2. 保存時に指定した名前で配列を取り出す
+    loaded_points = data['points']
+    loaded_colors = data['colors']
+
+    print(f"読み込み成功。")
+
+    # 3. メイン処理を実行
+    #    tryブロック内では、ロード処理とmain()関数の呼び出しのみを行います。
+    specify_desired_knot_position(loaded_points, loaded_colors) 
+
 
 except FileNotFoundError:
     print(f"エラー: ファイル '{input_filename}' が見つかりません。")
